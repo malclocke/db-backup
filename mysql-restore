@@ -1,0 +1,140 @@
+#!/bin/bash
+
+#  mysql-restore script
+#  Copyright (C) 2009 - 2012  Malcolm Locke
+
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software Foundation,
+#  Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+
+# restore mysql database from a previous date
+DEFAULT_BACKUPCONF=/etc/mysql/mysql-backup.conf
+DEFAULT_BACKUPDIR=/var/backups/mysql
+
+exec_mysql="yes"
+drop_db_on_exit="yes"
+date="yesterday"
+
+usage() {
+	cat <<EOT
+
+Usage: `basename $0`[ OPTIONS]  [ -f dumpfile | database ]
+
+  Restore database from backups
+
+  -c config         Use specified config file (default: $DEFAULT_BACKUPCONF)
+  -d date           Date from which to restore backup (default: $date)
+  -f file           Restore from specified dump file
+  -n                Don't drop database on exit
+  -m                Don't drop into a mysql shell, implies -n
+  -h                Show usage
+
+  By default, this script will drop you into a 'mysql' shell once
+  the database has been restored.  When you exit the mysql shell,
+  the database will be dropped.  The user running this script will
+  therefore require privileges to create databases.
+
+  The date supplied to -d must be parseable by the date(1) command.  
+  Examples are "12 Mar 2007", "1971-06-30" or "6 days ago".
+
+  'database' or '-f dumpfile' must be specified.
+
+EOT
+}
+
+while getopts c:d:f:nmh opt ; do
+	case "$opt" in
+		c) BACKUPCONF=$OPTARG ;;
+		d) date="$OPTARG" ;;
+		f) dumpfile="$OPTARG" ;;
+		n) drop_db_on_exit="no" ;;
+		m) drop_db_on_exit="no" ; exec_mysql="no" ;;
+		h) usage ; exit 0 ;;
+		*) usage ; exit 1 ;;
+	esac
+done
+
+shift $(($OPTIND - 1))
+
+if [ -z "$1" ] && [ -z "$dumpfile" ] ; then
+	usage
+	exit 1
+fi
+
+dbname=$1
+backupconf=${BACKUPCONF-$DEFAULT_BACKUPCONF}
+
+if [ -r "$backupconf" ] ; then
+	. $backupconf
+fi
+
+backupdir=${BACKUPDIR-$DEFAULT_BACKUPDIR}
+
+tmpfile=`mktemp /tmp/mysqlrestore_XXXXXX`
+rm $tmpfile
+tmpdb=`basename $tmpfile`
+
+if [ -z "$dumpfile" ] ; then
+	timestamp=`date --date=$date +%Y%m%d`
+	if [ -z "$timestamp" ] ; then
+		echo "Unable to generate timestamp from '$date'"
+		exit 1
+	fi
+	dumpfiles=`ls $backupdir/$dbname.${timestamp}_[0-9][0-9][0-9][0-9][0-9][0-9].sql.gz 2>/dev/null`
+	if [ -z "$dumpfiles" ] ; then
+		echo "Unable to find dump of '$dbname' for date '$date' ($timestamp)"
+		echo "  in dir '$backupdir'"
+		exit 1
+	fi
+	if [ `echo -e "$dumpfiles" | wc -w` -gt 1 ] ; then
+		echo "Multiple files found for date '$timestamp'"
+		echo
+		echo -e "$dumpfiles"
+		echo
+		echo "Please specify file with -f"
+		exit
+	fi
+	dumpfile=$dumpfiles
+fi
+
+if [ ! -r "$dumpfile" ] ; then
+	echo "Error: unable to read dumpfile '$dumpfile'"
+	exit 1
+fi
+
+
+mysql="mysql"
+if [ -n "$MYCNF" ] ; then
+	mysql="$mysql --defaults-file=$MYCNF"
+fi
+
+set -e
+echo "Creating database $tmpdb ... "
+echo "CREATE DATABASE $tmpdb" | $mysql
+echo "Restoring dump file '$dumpfile'"
+echo -n " -> to database '$tmpdb' ... "
+gunzip -c $dumpfile | $mysql $tmpdb
+echo "done"
+
+if [ "$exec_mysql" == "yes" ] ; then
+	echo "Starting MySQL client in database '$tmpdb' ..."
+	$mysql $tmpdb
+else
+	echo "Finished .. run 'mysql $tmpdb' to view database"
+	exit
+fi
+
+if [ "$drop_db_on_exit" == "yes" ] ; then
+	echo "Dropping database $tmpdb ..."
+	echo "DROP DATABASE $tmpdb" | $mysql
+fi

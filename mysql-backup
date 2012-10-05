@@ -1,0 +1,117 @@
+#!/bin/bash
+
+#  mysql-backup script
+#  Copyright (C) 2009 - 2012  Malcolm Locke
+
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software Foundation,
+#  Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+
+
+DEFAULT_CYCLE=7
+DEFAULT_BACKUPCONF=/etc/mysql/mysql-backup.conf
+DEFAULT_BACKUPDIR=/var/backups/mysql
+
+DEFAULT_UMASK=027
+
+usage() {
+	cat <<EOT
+
+  Usage: `basename $0` [ -h ] [ -c configfile ]
+EOT
+}
+
+while getopts "hc:" OPT ; do
+	case $OPT in
+		h) usage ; exit 0 ;;
+		c) BACKUPCONF=$OPTARG ;;
+		*) usage ; exit 1 ;;
+	esac
+done
+
+shift $(($OPTIND - 1))
+
+if [ $# -ne 0 ] ; then
+	usage
+	exit 1
+fi
+
+if [ -n "$BACKUPCONF" ] ; then
+	if [ ! -r "$BACKUPCONF" ] ; then
+		echo "Error: Unable to read config file '$BACKUPCONF'" 1>&2
+		exit 1
+	fi
+fi
+
+backupconf=${BACKUPCONF-$DEFAULT_BACKUPCONF}
+
+if [ -r $backupconf ] ; then
+	echo "Reading config from '$backupconf'"
+	. $backupconf
+fi
+
+backupdir=${BACKUPDIR-$DEFAULT_BACKUPDIR}
+cycle=${CYCLE-$DEFAULT_CYCLE}
+umask=${UMASK-$DEFAULT_UMASK}
+
+if [ ! -d "$backupdir" ] ; then
+	echo "Error: BACKUPDIR '$backupdir' does not exist" 1>&2
+	exit 1
+fi
+
+mysql="mysql"
+mysqldump="mysqldump"
+if [ -n "$MYCNF" ] ; then
+	mysql="$mysql --defaults-file=$MYCNF"
+	mysqldump="$mysqldump --defaults-file=$MYCNF"
+fi
+
+if [ -n "$DUMPOPTS" ] ; then
+	mysqldump="$mysqldump $DUMPOPTS"
+fi
+
+listdbcmd="SHOW DATABASES"
+if [ -n "$LIKE" ] ; then
+	listdbcmd="SHOW DATABASES LIKE '$LIKE'"
+fi
+
+umask $umask
+
+tmpfile=`mktemp /tmp/mysql-backup-XXXXXX`
+touch --date="$cycle days ago" $tmpfile
+
+for db in `echo "$listdbcmd" | $mysql -s` ; do
+	timestamp=`date +%Y%m%d_%H%M%S`
+	target="$backupdir/$db.$timestamp.sql.gz"
+	for oldfile in `ls $backupdir/${db}* 2>/dev/null | egrep "\.[0-9]{8}_[0-9]{6}\.sql\.gz"` ; do
+		if [ $tmpfile -nt $oldfile ] ; then
+			rm -v $oldfile
+		fi
+	done
+	echo -n "Dumping $db -> $target ... "
+	$mysqldump $db | gzip -c > $target
+	echo "done"
+done
+
+rm $tmpfile
+
+# Dropped database dump files will not be rotated out of existence,
+# no notify the admin here
+orphaned=`find $backupdir -type f -name "*.sql.gz*" -mtime +$cycle`
+if [ -n "$orphaned" ] ; then
+	echo "Warning: Found dump files older than rotation cycle" 1>&2
+	echo "  probably dropped databases, consider manual cleanup" 1>&2
+	echo "  on these files:" 1>&2
+	echo 1>&2
+	echo -e "$orphaned" 1>&2
+fi
